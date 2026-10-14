@@ -8,6 +8,6 @@ license = "GPL-2.0-or-later"
 [dependencies]
 # openDJ's engine and plugin traits. Point these at the openDJ repository,
 # or at a local checkout with `path = ".../crates/engine"` and so on.
-mixxx-engine = { git = "https://github.com/sebastian-beca/mixxx-rs" }
-mixxx-plugins = { git = "https://github.com/sebastian-beca/mixxx-rs" }
+mixxx-engine = { git = "https://github.com/sebastian-beca/opendj" }
+mixxx-plugins = { git = "https://github.com/sebastian-beca/opendj" }
 roxmltree = "0.21"
