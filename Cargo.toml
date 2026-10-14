@@ -1,0 +1,13 @@
+[package]
+name = "opendj-addon-vdj"
+description = "Private openDJ add-on: brings a VirtualDJ library into the collection"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+# openDJ's engine and plugin traits. Point these at the openDJ repository,
+# or at a local checkout with `path = ".../crates/engine"` and so on.
+mixxx-engine = { git = "https://github.com/sebastian-beca/mixxx-rs" }
+mixxx-plugins = { git = "https://github.com/sebastian-beca/mixxx-rs" }
+roxmltree = "0.21"
