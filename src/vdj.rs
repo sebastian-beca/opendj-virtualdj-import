@@ -134,11 +134,9 @@ fn fill_from_tags(t: &mut Track, tags: &Track) {
     fill(&mut i.label, &f.label);
     fill(&mut i.composer, &f.composer);
     fill(&mut i.remixer, &f.remixer);
-    fill(&mut i.mix, &f.mix);
+    fill(&mut i.remix, &f.remix);
     fill(&mut i.isrc, &f.isrc);
-    if i.year == 0 {
-        i.year = f.year;
-    }
+    fill(&mut i.year, &f.year);
     if i.track_number == 0 {
         i.track_number = f.track_number;
     }
@@ -308,16 +306,22 @@ fn song_track(id: usize, path: PathBuf, song: roxmltree::Node) -> Track {
             play_count: number(infos, "PlayCount").unwrap_or(0.0) as u32,
             hotcues,
             fixed_grid: bpm > 0.0,
-            year: number(tags, "Year").filter(|y| *y > 0.0).unwrap_or(0.0) as u32,
+            year: Some(attr(tags, "Year"))
+                .filter(|y| y != "0")
+                .unwrap_or_default(),
             track_number: number(tags, "TrackNumber")
                 .filter(|n| *n > 0.0)
                 .unwrap_or(0.0) as u32,
             label: attr(tags, "Label"),
             composer: attr(tags, "Composer"),
             remixer: attr(tags, "Remixer"),
-            mix: remix,
+            remix,
+            user1: attr(tags, "User1"),
+            user2: attr(tags, "User2"),
             added: number(infos, "FirstSeen").unwrap_or(0.0) as i64,
-            last_played: number(infos, "LastPlay").unwrap_or(0.0) as i64,
+            last_played: number(infos, "LastPlay")
+                .filter(|p| *p > 0.0)
+                .map(|p| p as i64),
             // A level VirtualDJ keeps as a factor; openDJ keeps decibels.
             gain_db: number(infos, "Gain")
                 .filter(|g| *g > 0.0)
@@ -385,7 +389,7 @@ mod tests {
             let mut t = mixxx_engine::scan::read_track(0, p);
             t.album = "From the file".into();
             t.info.isrc = "GBAAA9900001".into();
-            t.info.year = 2001;
+            t.info.year = "2001".into();
             Some(t)
         };
         let out = parse(DB, 100, |p| !p.ends_with("gone.mp3"), file_tags).unwrap();
@@ -451,15 +455,22 @@ mod tests {
             ]
         );
         let i = &a.info;
-        assert_eq!((i.year, i.track_number), (1999, 3));
+        assert_eq!((i.year.as_str(), i.track_number), ("1999", 3));
         assert_eq!((i.label.as_str(), i.composer.as_str()), ("Warp", "C"));
-        assert_eq!(i.mix, "Club Mix");
-        assert_eq!((i.added, i.last_played), (1_648_875_124, 1_714_769_511));
+        assert_eq!(i.remix, "Club Mix");
+        assert_eq!(
+            (i.user1.as_str(), i.user2.as_str()),
+            ("#uplifting", "#synth #vox")
+        );
+        assert_eq!(
+            (i.added, i.last_played),
+            (1_648_875_124, Some(1_714_769_511))
+        );
         assert!((i.gain_db.unwrap() - 6.0206).abs() < 1e-3);
         assert_eq!(a.album, "LP", "VirtualDJ's own value wins");
         assert_eq!(i.isrc, "GBAAA9900001", "the file fills in the rest");
         assert_eq!(out.tracks[1].album, "From the file");
-        assert_eq!(out.tracks[1].info.year, 2001);
+        assert_eq!(out.tracks[1].info.year, "2001");
         // A grid point's own Bpm wins over the tag's, and further points
         // start sections at their own tempo.
         let b = &out.tracks[1];
