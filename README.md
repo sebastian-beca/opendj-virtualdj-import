@@ -3,19 +3,41 @@
 A private add-on for openDJ that brings a VirtualDJ library into the
 collection at start. It reads `database.xml` from
 `~/Library/Application Support/VirtualDJ`, `~/Documents/VirtualDJ` or
-`~/.vdj` (or the file `OPENDJ_VDJ_DATABASE` names), only when it has changed
-since last time, and never writes to it.
+`~/.vdj` (or the file `OPENDJ_VDJ_DATABASE` names), and the playlists,
+folders and history next to it, only when something has changed since last
+time. It never writes to any of them.
 
 Each local track keeps from VirtualDJ:
 - title (with the remix), artist, album and genre
-- stars, colour, comment and play count
+- year, track number, record label, composer and remixer
+- stars, colour, comment, play count, date added and last played
 - BPM, beat grid and key, used as they are without re-analysis
-- hot cues 1 to 8
+- hot cues with their names and colours, and saved loops (on the pads after
+  the hot cues)
+- named sections (remix points), automix points and the track's gain
+
+What VirtualDJ leaves empty is filled in from the file's own tags (files
+still in iCloud are left alone, so nothing is downloaded).
 
 The Grouping and the User1/User2 hashtags show under *Groupings and Tags* in
 openDJ's tree, and search covers them. Grids and cues you edit in openDJ are
 kept on later imports. Streaming entries and VirtualDJ's offline copies of
 streamed tracks (`.vdjcache`) are skipped.
+
+## Playlists, folders and history
+
+*Settings > Library > From VirtualDJ* picks what comes across, into a
+*VirtualDJ* folder in openDJ's tree:
+
+| Switch | What | Default |
+|---|---|---|
+| Playlists | `Playlists/*.m3u`, in their folders and order | on |
+| Virtual folders | `Folders/**/*.vdjfolder` that list songs | on |
+| Filter folders | `.vdjfolder` filters, as smart lists where openDJ's search can say the same thing (`genre is house and bpm > 120`); others are skipped | off |
+| History | `History/*.m3u`, one session per day, in the History tab | on |
+
+The lists are made again whenever they change in VirtualDJ, so change them
+there. Streamed tracks in them are left out, as openDJ only plays files.
 
 ## Building it into openDJ
 
