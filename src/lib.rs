@@ -1,15 +1,19 @@
 //! An openDJ add-on that brings a VirtualDJ library into the collection at
-//! start (see [`vdj`]). It isn't part of openDJ: see the README for building
-//! it into a copy of the app for your own use.
+//! start: the tracks in `database.xml` (see [`vdj`]), and the playlists,
+//! folders and history kept next to it (see [`lists`]). It isn't part of
+//! openDJ: see the README for building it into a copy of the app for your
+//! own use.
 
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-use mixxx_engine::Track;
-use mixxx_plugins::LibraryImport;
+use mixxx_plugins::{ImportedLibrary, LibraryImport, ListGroup};
 
+pub mod lists;
 pub mod vdj;
 
-/// VirtualDJ's `database.xml`, read whenever it has changed since last time.
+/// VirtualDJ's `database.xml` and its lists, read whenever they have
+/// changed since last time.
 pub struct VirtualDj;
 
 impl LibraryImport for VirtualDj {
@@ -17,12 +21,45 @@ impl LibraryImport for VirtualDj {
         "vdj"
     }
 
+    fn title(&self) -> &str {
+        "VirtualDJ"
+    }
+
     fn database(&self) -> Option<PathBuf> {
         vdj::default_database()
     }
 
-    fn read(&self, database: &Path) -> Result<Vec<Track>, String> {
-        let import = vdj::import(database, 0, Path::exists)?;
+    fn list_groups(&self) -> Vec<ListGroup> {
+        lists::groups()
+    }
+
+    /// The newest change to the database or to anything in the list folders.
+    fn stamp(&self, database: &Path) -> String {
+        let home = database.parent().unwrap_or(Path::new("."));
+        let mut newest = modified(database);
+        let mut stack: Vec<PathBuf> = ["Playlists", "Folders", "History"]
+            .iter()
+            .map(|d| home.join(d))
+            .collect();
+        while let Some(dir) = stack.pop() {
+            newest = newest.max(modified(&dir));
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    newest = newest.max(modified(&p));
+                }
+            }
+        }
+        format!("{}:{newest}", database.display())
+    }
+
+    fn read(&self, database: &Path, groups: &[&str]) -> Result<ImportedLibrary, String> {
+        let import = vdj::import(database, 0, Path::exists, vdj::read_file_tags)?;
         eprintln!(
             "VirtualDJ library: {} tracks; skipped {} streaming, {} cached, {} missing",
             import.tracks.len(),
@@ -30,6 +67,26 @@ impl LibraryImport for VirtualDj {
             import.cached,
             import.missing
         );
-        Ok(import.tracks.iter().map(|t| (**t).clone()).collect())
+        let home = database.parent().unwrap_or(Path::new("."));
+        let mut skipped = lists::Skipped::default();
+        let lists = lists::read(home, groups, &mut skipped);
+        if !skipped.filters.is_empty() {
+            eprintln!(
+                "VirtualDJ filter folders openDJ's search can't say yet: {}",
+                skipped.filters.join("; ")
+            );
+        }
+        Ok(ImportedLibrary {
+            tracks: import.tracks.iter().map(|t| (**t).clone()).collect(),
+            lists,
+        })
     }
+}
+
+fn modified(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
 }

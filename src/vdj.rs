@@ -1,6 +1,7 @@
 //! Reads VirtualDJ's library, `database.xml`, so a collection built in
-//! VirtualDJ comes across with its tags, ratings, colours, beat grids, keys
-//! and hot cues. The file is only read, never written, as VirtualDJ asks of
+//! VirtualDJ comes across with its tags, ratings, colours, beat grids, keys,
+//! hot cues, saved loops, named sections and automix points. What VirtualDJ
+//! leaves empty is filled in from the file's own tags. The file is only read, never written, as VirtualDJ asks of
 //! other apps (<https://virtualdj.com/wiki/VDJ_database.html>).
 //!
 //! Each `<Song FilePath=…>` holds `<Tags>` (Author, Title, Remix, Album,
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mixxx_engine::beats::{BeatGrid, GridMarker};
-use mixxx_engine::{Hotcue, LibraryInfo, Source, Track};
+use mixxx_engine::{Hotcue, LibraryInfo, Marker, MarkerKind, Source, Track};
 
 /// Where VirtualDJ keeps its main database: `OPENDJ_VDJ_DATABASE`, else
 /// the first of VirtualDJ's home folders that has one.
@@ -47,20 +48,29 @@ pub struct Import {
 }
 
 /// Reads the database at `path`. Tracks get ids from `first_id`; `exists`
-/// says whether a file is there (so tests need no real files).
+/// says whether a file is there, and `file_tags` reads a file's own tags
+/// (so tests need no real files).
 pub fn import(
     path: &Path,
     first_id: usize,
     exists: impl Fn(&Path) -> bool,
+    file_tags: impl Fn(&Path) -> Option<Track>,
 ) -> Result<Import, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse(&text, first_id, exists)
+    parse(&text, first_id, exists, file_tags)
+}
+
+/// The tags of a file on this computer, unless reading them would download
+/// it from iCloud first.
+pub fn read_file_tags(path: &Path) -> Option<Track> {
+    (!mixxx_engine::scan::is_cloud_only(path)).then(|| mixxx_engine::scan::read_track(0, path))
 }
 
 pub fn parse(
     text: &str,
     first_id: usize,
     exists: impl Fn(&Path) -> bool,
+    file_tags: impl Fn(&Path) -> Option<Track>,
 ) -> Result<Import, String> {
     let doc = roxmltree::Document::parse(text).map_err(|e| e.to_string())?;
     let mut out = Import::default();
@@ -87,9 +97,57 @@ pub fn parse(
             continue;
         }
         let id = first_id + out.tracks.len();
-        out.tracks.push(Arc::new(song_track(id, path, song)));
+        let mut track = song_track(id, path, song);
+        if let Some(tags) = file_tags(&path_of(&track)) {
+            fill_from_tags(&mut track, &tags);
+        }
+        out.tracks.push(Arc::new(track));
     }
     Ok(out)
+}
+
+fn path_of(t: &Track) -> PathBuf {
+    match &t.source {
+        Source::File(p) => p.clone(),
+        Source::Synth { .. } => PathBuf::new(),
+    }
+}
+
+/// Fills what VirtualDJ left empty from the file's tags. VirtualDJ's own
+/// values win: they are what the DJ sees and edits there.
+fn fill_from_tags(t: &mut Track, tags: &Track) {
+    let fill = |mine: &mut String, theirs: &str| {
+        if mine.is_empty() {
+            *mine = theirs.to_string();
+        }
+    };
+    fill(&mut t.artist, &tags.artist);
+    fill(&mut t.album, &tags.album);
+    fill(&mut t.genre, &tags.genre);
+    if t.key.is_empty() && !tags.key.is_empty() {
+        t.key = tags.key.clone();
+    }
+    if t.duration <= 0.0 {
+        t.duration = tags.duration;
+    }
+    let (i, f) = (&mut t.info, &tags.info);
+    fill(&mut i.label, &f.label);
+    fill(&mut i.composer, &f.composer);
+    fill(&mut i.remixer, &f.remixer);
+    fill(&mut i.remix, &f.remix);
+    fill(&mut i.isrc, &f.isrc);
+    fill(&mut i.year, &f.year);
+    if i.track_number == 0 {
+        i.track_number = f.track_number;
+    }
+    if i.disc_number == 0 {
+        i.disc_number = f.disc_number;
+    }
+}
+
+/// A colour VirtualDJ keeps as an ARGB number, as 0xRRGGBB.
+fn color(value: f64) -> u32 {
+    (value as u64 & 0xff_ffff) as u32
 }
 
 fn song_track(id: usize, path: PathBuf, song: roxmltree::Node) -> Track {
@@ -155,9 +213,11 @@ fn song_track(id: usize, path: PathBuf, song: roxmltree::Node) -> Track {
                 number: n as usize - 1,
                 seconds,
                 name: p.attribute("Name").unwrap_or_default().to_string(),
+                end: None,
+                color: number(Some(*p), "Color").map(color),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
     let labels = ["User1", "User2"]
         .iter()
         .flat_map(|k| {
@@ -167,11 +227,42 @@ fn song_track(id: usize, path: PathBuf, song: roxmltree::Node) -> Track {
                 .collect::<Vec<_>>()
         })
         .collect();
-    let color = number(infos, "UserColor").map(|c| (c as u64 & 0xff_ffff) as u32);
+    let track_color = number(infos, "UserColor").map(color);
+    let markers: Vec<Marker> = points
+        .iter()
+        .filter_map(|p| {
+            let (kind, name) = match p.attribute("Type")? {
+                "remix" => (MarkerKind::Section, p.attribute("Name").unwrap_or_default()),
+                "automix" => (MarkerKind::Automix, p.attribute("Point")?),
+                _ => return None,
+            };
+            Some(Marker {
+                kind,
+                seconds: number(Some(*p), "Pos")?,
+                end: None,
+                name: name.to_string(),
+                color: number(Some(*p), "Color").map(color),
+            })
+        })
+        .collect();
+    // Saved loops (Size in beats) go on the pads after the hot cues, as
+    // openDJ keeps loops on the same pads; in VirtualDJ's order.
+    let mut loops: Vec<(f64, f64, f64)> = points
+        .iter()
+        .filter(|p| p.attribute("Type") == Some("loop"))
+        .filter_map(|p| {
+            Some((
+                number(Some(*p), "Num").unwrap_or(0.0),
+                number(Some(*p), "Pos")?,
+                number(Some(*p), "Size").filter(|s| *s > 0.0)?,
+            ))
+        })
+        .collect();
+    loops.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Each further grid point starts a section at its own tempo (VirtualDJ
     // writes them for tracks whose tempo drifts).
-    let mut markers = Vec::new();
+    let mut grid_markers = Vec::new();
     let mut tempo = bpm;
     for p in &grid_points {
         let Some(pos) = number(Some(**p), "Pos") else {
@@ -180,7 +271,7 @@ fn song_track(id: usize, path: PathBuf, song: roxmltree::Node) -> Track {
         tempo = number(Some(**p), "Bpm")
             .filter(|b| (20.0..=400.0).contains(b))
             .unwrap_or(tempo);
-        markers.push(GridMarker {
+        grid_markers.push(GridMarker {
             seconds: pos,
             bpm: tempo,
         });
@@ -211,16 +302,52 @@ fn song_track(id: usize, path: PathBuf, song: roxmltree::Node) -> Track {
                 .to_string(),
             grouping: attr(tags, "Grouping"),
             labels,
-            color,
+            color: track_color,
             play_count: number(infos, "PlayCount").unwrap_or(0.0) as u32,
             hotcues,
             fixed_grid: bpm > 0.0,
+            year: Some(attr(tags, "Year"))
+                .filter(|y| y != "0")
+                .unwrap_or_default(),
+            track_number: number(tags, "TrackNumber")
+                .filter(|n| *n > 0.0)
+                .unwrap_or(0.0) as u32,
+            label: attr(tags, "Label"),
+            composer: attr(tags, "Composer"),
+            remixer: attr(tags, "Remixer"),
+            remix,
+            user1: attr(tags, "User1"),
+            user2: attr(tags, "User2"),
+            added: number(infos, "FirstSeen").unwrap_or(0.0) as i64,
+            last_played: number(infos, "LastPlay")
+                .filter(|p| *p > 0.0)
+                .map(|p| p as i64),
+            // A level VirtualDJ keeps as a factor; openDJ keeps decibels.
+            gain_db: number(infos, "Gain")
+                .filter(|g| *g > 0.0)
+                .map(|g| (20.0 * g.log10()) as f32),
+            markers,
             ..Default::default()
         },
     };
-    if markers.len() > 1 && bpm > 0.0 {
-        track.set_grid(BeatGrid::new(markers));
+    if grid_markers.len() > 1 && bpm > 0.0 {
+        track.set_grid(BeatGrid::new(grid_markers));
     }
+    for (pos, size) in loops.into_iter().map(|(_, pos, size)| (pos, size)) {
+        let Some(number) = (0..).find(|n| !track.info.hotcues.iter().any(|c| c.number == *n))
+        else {
+            break;
+        };
+        let end = pos + size * track.beat_length_at(pos);
+        track.info.hotcues.push(Hotcue {
+            number,
+            seconds: pos,
+            name: String::new(),
+            end: Some(end),
+            color: None,
+        });
+    }
+    track.info.hotcues.sort_by_key(|c| c.number);
     track
 }
 
@@ -231,12 +358,14 @@ mod tests {
     const DB: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <VirtualDJ_Database Version="2026">
  <Song FilePath="/music/a.flac" FileSize="1">
-  <Tags Author="Artist A" Title="Song A" Remix="Club Mix" Genre="House" Album="LP" Stars="4" Grouping="11 YOGA" User1="#uplifting" User2="#synth #vox" Flag="1" />
-  <Infos SongLength="300.5" PlayCount="7" UserColor="4294959104" />
+  <Tags Author="Artist A" Title="Song A" Remix="Club Mix" Genre="House" Album="LP" Stars="4" Grouping="11 YOGA" User1="#uplifting" User2="#synth #vox" Year="1999" TrackNumber="3" Label="Warp" Composer="C" Flag="1" />
+  <Infos SongLength="300.5" PlayCount="7" UserColor="4294959104" FirstSeen="1648875124" LastPlay="1714769511" Gain="2.0" />
   <Comment>nice one</Comment>
   <Scan Version="801" Bpm="0.468750" Phase="0.25" Key="Am" Flag="32768" />
   <Poi Pos="0.30" Type="beatgrid" />
-  <Poi Pos="37.5" Num="1" Type="cue" Name="Drop" />
+  <Poi Pos="37.5" Num="1" Type="cue" Name="Drop" Color="4291559424" />
+  <Poi Pos="60" Num="2" Type="loop" Size="8.0" Slot="1" />
+  <Poi Num="-1" Type="loop" Size="8.0" Slot="1" />
   <Poi Pos="71.9" Num="3" Type="cue" />
   <Poi Name="Break 1" Pos="100" Type="remix" />
   <Poi Pos="10" Type="automix" Point="fadeStart" />
@@ -254,7 +383,16 @@ mod tests {
 
     #[test]
     fn imports_local_tracks_with_their_grid_cues_and_tags() {
-        let out = parse(DB, 100, |p| !p.ends_with("gone.mp3")).unwrap();
+        // The file's own tags fill in what VirtualDJ leaves empty.
+        let file_tags = |p: &Path| {
+            // A file that isn't there reads as empty tags.
+            let mut t = mixxx_engine::scan::read_track(0, p);
+            t.album = "From the file".into();
+            t.info.isrc = "GBAAA9900001".into();
+            t.info.year = "2001".into();
+            Some(t)
+        };
+        let out = parse(DB, 100, |p| !p.ends_with("gone.mp3"), file_tags).unwrap();
         assert_eq!(
             (out.tracks.len(), out.streaming, out.cached, out.missing),
             (2, 1, 1, 1)
@@ -282,15 +420,57 @@ mod tests {
                 Hotcue {
                     number: 0,
                     seconds: 37.5,
-                    name: "Drop".into()
+                    name: "Drop".into(),
+                    end: None,
+                    color: Some(0xcc0000),
+                },
+                // The saved loop takes the first free pad: 8 beats at 128.
+                Hotcue {
+                    number: 1,
+                    seconds: 60.0,
+                    name: String::new(),
+                    end: Some(63.75),
+                    color: None,
                 },
                 Hotcue {
                     number: 2,
                     seconds: 71.9,
-                    name: String::new()
+                    name: String::new(),
+                    end: None,
+                    color: None,
                 },
             ]
         );
+        let names: Vec<(&str, MarkerKind)> = a
+            .info
+            .markers
+            .iter()
+            .map(|m| (m.name.as_str(), m.kind))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Break 1", MarkerKind::Section),
+                ("fadeStart", MarkerKind::Automix)
+            ]
+        );
+        let i = &a.info;
+        assert_eq!((i.year.as_str(), i.track_number), ("1999", 3));
+        assert_eq!((i.label.as_str(), i.composer.as_str()), ("Warp", "C"));
+        assert_eq!(i.remix, "Club Mix");
+        assert_eq!(
+            (i.user1.as_str(), i.user2.as_str()),
+            ("#uplifting", "#synth #vox")
+        );
+        assert_eq!(
+            (i.added, i.last_played),
+            (1_648_875_124, Some(1_714_769_511))
+        );
+        assert!((i.gain_db.unwrap() - 6.0206).abs() < 1e-3);
+        assert_eq!(a.album, "LP", "VirtualDJ's own value wins");
+        assert_eq!(i.isrc, "GBAAA9900001", "the file fills in the rest");
+        assert_eq!(out.tracks[1].album, "From the file");
+        assert_eq!(out.tracks[1].info.year, "2001");
         // A grid point's own Bpm wins over the tag's, and further points
         // start sections at their own tempo.
         let b = &out.tracks[1];
@@ -308,7 +488,7 @@ mod tests {
         let Some(path) = std::env::var_os("OPENDJ_VDJ_TEST_DB") else {
             return;
         };
-        let out = import(Path::new(&path), 0, |_| true).unwrap();
+        let out = import(Path::new(&path), 0, |_| true, |_| None).unwrap();
         let cues: usize = out.tracks.iter().map(|t| t.info.hotcues.len()).sum();
         let gridded = out.tracks.iter().filter(|t| t.bpm > 0.0).count();
         eprintln!(
