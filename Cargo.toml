@@ -10,6 +10,6 @@ license = "GPL-2.0-or-later"
 # or at a local checkout with `path = ".../crates/engine"` and so on.
 # Until openDJ's imported-lists change is merged, this builds against its
 # branch; switch back to the default branch after.
-mixxx-engine = { git = "https://github.com/sebastian-beca/opendj", branch = "claude/project-thread-g90d1a" }
-mixxx-plugins = { git = "https://github.com/sebastian-beca/opendj", branch = "claude/project-thread-g90d1a" }
+mixxx-engine = { git = "https://github.com/sebastian-beca/opendj" }
+mixxx-plugins = { git = "https://github.com/sebastian-beca/opendj" }
 roxmltree = "0.21"
